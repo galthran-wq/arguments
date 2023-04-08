@@ -1,0 +1,9 @@
+*.pdf
+*.pt
+*.ckpt
+__pycache__
+.vscode
+data
+# external repositories
+arguEParser
+argument_BERT
