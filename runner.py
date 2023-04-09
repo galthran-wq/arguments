@@ -7,12 +7,13 @@ separate runner from cli
 import argparse
 import torch
 from torch.utils.data import DataLoader
-from dataset import ComponentIdentification, DictionaryCollator
-from model import LinearEmbeddingTowerForClassification
-from transformers import BertTokenizer, BertModel
 import lightning.pytorch as pl
 from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping
 from lightning.pytorch.loggers import TensorBoardLogger
+
+from embedder import BertEmbedder
+from dataset import ComponentIdentification, DictionaryCollator
+from model import LinearEmbeddingTowerForClassification
 
 
 def cli_main():
@@ -57,14 +58,11 @@ if __name__ == "__main__":
     train_dl = DataLoader(train, batch_size=8, collate_fn=DictionaryCollator())
     val_dl = DataLoader(val, batch_size=64, collate_fn=DictionaryCollator())
 
-    bert = BertModel.from_pretrained("bert-base-uncased")
-    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+    embedder = BertEmbedder()
     model = LinearEmbeddingTowerForClassification(
-        preprocessor=tokenizer, 
-        embedder=bert, 
+        embedder=embedder, 
         output_dim=3,
         learning_rate=args.learning_rate,
-        freeze_embedder=args.freeze_embedder,
         extra_features_dim=ds.n_features
     )
     checkpoint_callback = ModelCheckpoint(

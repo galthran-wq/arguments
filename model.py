@@ -20,21 +20,17 @@ class LinearEmbeddingTowerForClassification(pl.LightningModule):
     """
     def __init__(
             self, 
-            preprocessor, 
             embedder, 
-            embedding_dim=768, 
             extra_features_dim=0, 
             n_hidden_layers=3,
             output_dim=2,
             learning_rate=5e-5,
-            freeze_embedder=False
         ):
         super().__init__()
-        self.feature_dim = embedding_dim + extra_features_dim
-        self.learning_rate = learning_rate
-        self.preprocessor = preprocessor
         self.embedder = embedder
-        self.freeze_embedder = freeze_embedder 
+        self.embedding_dim = self.embedder.dim
+        self.feature_dim = self.embedding_dim + extra_features_dim
+        self.learning_rate = learning_rate
         self.head = nn.Sequential(*([
             nn.Sequential(
                 nn.Dropout(0.5),
@@ -62,16 +58,9 @@ class LinearEmbeddingTowerForClassification(pl.LightningModule):
 
 
     def get_prediction(self, to_embed, other_features):
-        inputs = self.preprocessor(to_embed, return_tensors="pt", padding=True).to(self.device)
-
-        if self.freeze_embedder:
-            with torch.no_grad():
-                sentence_embedding = self.embedder(**inputs).last_hidden_state[:, 0, :]
-        else:
-            sentence_embedding = self.embedder(**inputs).last_hidden_state[:, 0, :]
-
-        x_hat = self.head(torch.concat([sentence_embedding, other_features.type(sentence_embedding.dtype)], dim=-1))
-        return x_hat
+        sentence_embedding = self.embedder(to_embed, device=self.device)
+        logits = self.head(torch.concat([sentence_embedding, other_features.type(sentence_embedding.dtype)], dim=-1))
+        return logits 
 
     def update_metrics(self, logits, y, partition="train"):
         metrics = self.train_metrics if partition=="train" else self.val_metrics
@@ -108,23 +97,23 @@ class LinearEmbeddingTowerForClassification(pl.LightningModule):
         to_embed = batch["sentence"]
         other_features = batch["sentence_features"]
         y = batch["labels"]
-        x_hat = self.get_prediction(to_embed, other_features)
-        loss = self.loss(x_hat, y)
+        logits = self.get_prediction(to_embed, other_features)
+        loss = self.loss(logits, y)
         # Logging to TensorBoard (if installed) by default
         self.log("train_loss", loss)
-        self.update_metrics(x_hat, y)
+        self.update_metrics(logits, y)
         return loss
 
     def validation_step(self, batch, batch_idx):
         to_embed = batch["sentence"]
         other_features = batch["sentence_features"]
         y = batch["labels"]
-        x_hat = self.get_prediction(to_embed, other_features)
-        loss = self.loss(x_hat, y)
+        logits = self.get_prediction(to_embed, other_features)
+        loss = self.loss(logits, y)
 
         # Logging to TensorBoard (if installed) by default
         self.log("val_loss", loss)
-        self.update_metrics(x_hat, y, partition="val")
+        self.update_metrics(logits, y, partition="val")
         return loss
     
     def on_train_start(self) -> None:
