@@ -1,7 +1,13 @@
+"""
+TODO:
+make runner into a separate class;
+separate boilerplate code with defining characteristics -- model and ds
+separate runner from cli
+"""
 import argparse
 import torch
 from torch.utils.data import DataLoader
-from dataset import ComponentIdentification2
+from dataset import ComponentIdentification, DictionaryCollator
 from model import LinearEmbeddingTowerForClassification
 from transformers import BertTokenizer, BertModel
 import lightning.pytorch as pl
@@ -38,7 +44,7 @@ if __name__ == "__main__":
 
     pl.seed_everything(args.seed, workers=True)
 
-    ds = ComponentIdentification2()
+    ds = ComponentIdentification()
     generator = torch.Generator().manual_seed(args.seed)
 
     train, val = torch.utils.data.random_split(
@@ -48,8 +54,8 @@ if __name__ == "__main__":
     if args.overfit_batch:
         train = torch.utils.data.Subset(train, range(10))
 
-    train_dl = DataLoader(train, batch_size=8)
-    val_dl = DataLoader(val, batch_size=64)
+    train_dl = DataLoader(train, batch_size=8, collate_fn=DictionaryCollator())
+    val_dl = DataLoader(val, batch_size=64, collate_fn=DictionaryCollator())
 
     bert = BertModel.from_pretrained("bert-base-uncased")
     tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
@@ -58,7 +64,8 @@ if __name__ == "__main__":
         embedder=bert, 
         output_dim=3,
         learning_rate=args.learning_rate,
-        freeze_embedder=args.freeze_embedder
+        freeze_embedder=args.freeze_embedder,
+        extra_features_dim=ds.n_features
     )
     checkpoint_callback = ModelCheckpoint(
         monitor="val_loss",

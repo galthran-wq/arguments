@@ -19,6 +19,12 @@ class ComponentIdentification(Dataset):
             ADU=True
         )
         self.data = data_builder.add_features(self.data, has_2=False) 
+        self.feature_columns = [
+            'positArg1',
+            'tokensArg1', 'sharedStemWordsFull1',
+            'numberOfSharedStemWordsFull1'
+        ]
+        self.n_features = len(self.data.loc[0, "pos1"]) + len(self.feature_columns)
 
     def __len__(self):
         return len(self.data)
@@ -35,15 +41,9 @@ class ComponentIdentification(Dataset):
         """
         sentence = self.data.loc[index, "originalArg1"]
         context = self.data.loc[index, "fullText1"]
-        label = self.data.loc[index, "label"]
+        label = self.data.loc[index, "label"].item()
         sentence_features = self.data.loc[index, "pos1"].copy()
-        sentence_features += self.data.loc[index, 
-            [
-            'positArg1',
-            'tokensArg1', 'sharedStemWordsFull1',
-            'numberOfSharedStemWordsFull1'
-            ]
-        ].tolist()
+        sentence_features += self.data.loc[index, self.feature_columns].tolist()
 
         return {
             "sentence": sentence, 

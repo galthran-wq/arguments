@@ -15,18 +15,22 @@ class LinearEmbeddingTowerForClassification(pl.LightningModule):
     Embedding -- because we embed something with transformers
     Tower -- because we concat extra features to the embeddings
     Linear -- because the head is linear
+
+    TODO: make embedder into a separate class; move preprocessor there.
     """
     def __init__(
             self, 
             preprocessor, 
             embedder, 
-            feature_dim=768, 
+            embedding_dim=768, 
+            extra_features_dim=0, 
             n_hidden_layers=3,
             output_dim=2,
             learning_rate=5e-5,
             freeze_embedder=False
         ):
         super().__init__()
+        self.feature_dim = embedding_dim + extra_features_dim
         self.learning_rate = learning_rate
         self.preprocessor = preprocessor
         self.embedder = embedder
@@ -34,13 +38,13 @@ class LinearEmbeddingTowerForClassification(pl.LightningModule):
         self.head = nn.Sequential(*([
             nn.Sequential(
                 nn.Dropout(0.5),
-                nn.Linear(feature_dim // i, feature_dim // (i+1))
+                nn.Linear(self.feature_dim // i, self.feature_dim // (i+1))
             )
             for i in range(1, n_hidden_layers)
         ] + [
             nn.Sequential(
                 nn.Dropout(0.5),
-                nn.Linear(feature_dim // n_hidden_layers, output_dim)
+                nn.Linear(self.feature_dim // n_hidden_layers, output_dim)
             )
         ]))
         self.loss = nn.CrossEntropyLoss()
@@ -57,8 +61,8 @@ class LinearEmbeddingTowerForClassification(pl.LightningModule):
         self.val_metrics = deepcopy(self.train_metrics)
 
 
-    def get_prediction(self, x):
-        inputs = self.preprocessor(x, return_tensors="pt", padding=True).to(self.device)
+    def get_prediction(self, to_embed, other_features):
+        inputs = self.preprocessor(to_embed, return_tensors="pt", padding=True).to(self.device)
 
         if self.freeze_embedder:
             with torch.no_grad():
@@ -66,7 +70,7 @@ class LinearEmbeddingTowerForClassification(pl.LightningModule):
         else:
             sentence_embedding = self.embedder(**inputs).last_hidden_state[:, 0, :]
 
-        x_hat = self.head(sentence_embedding)
+        x_hat = self.head(torch.concat([sentence_embedding, other_features.type(sentence_embedding.dtype)], dim=-1))
         return x_hat
 
     def update_metrics(self, logits, y, partition="train"):
@@ -94,16 +98,17 @@ class LinearEmbeddingTowerForClassification(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         """
-        TODO: extra features & refactor into separate classes to generalize for token classification.
-        x:
-            - to_embed: [batch_size]
-            - extra (Optional): [batch_size, n_extra]
-        Constraint: embedding_dim + n_extra = feature_dim
-        y:
-            [batch_size]
+        TODO: refactor into separate classes to generalize for token classification.
+        batch -- dictionary:
+            - sentence: str
+            - context: str
+            - sentence_features: [batch_size, extra_features_dim]
+            - labels: [batch_size]
         """
-        x, y = batch
-        x_hat = self.get_prediction(x)
+        to_embed = batch["sentence"]
+        other_features = batch["sentence_features"]
+        y = batch["labels"]
+        x_hat = self.get_prediction(to_embed, other_features)
         loss = self.loss(x_hat, y)
         # Logging to TensorBoard (if installed) by default
         self.log("train_loss", loss)
@@ -111,8 +116,10 @@ class LinearEmbeddingTowerForClassification(pl.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        x, y = batch
-        x_hat = self.get_prediction(x)
+        to_embed = batch["sentence"]
+        other_features = batch["sentence_features"]
+        y = batch["labels"]
+        x_hat = self.get_prediction(to_embed, other_features)
         loss = self.loss(x_hat, y)
 
         # Logging to TensorBoard (if installed) by default
