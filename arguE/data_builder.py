@@ -1,6 +1,6 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
-import feature_extractor
+from . import feature_extractor
 import numpy as np
 import pandas as pd
 from nltk.tokenize import sent_tokenize
