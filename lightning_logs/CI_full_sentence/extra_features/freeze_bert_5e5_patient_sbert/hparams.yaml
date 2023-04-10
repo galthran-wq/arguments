@@ -1,0 +1,12 @@
+seed: 42
+overfit_batch: null
+logs: false
+patience: 100
+logdir: lightning_logs
+experiment_name: CI_full_sentence
+experiment_version: shared/freeze_bert_5e5_patient_sbert
+eval_period_epochs: 1
+max_train_epochs: 200
+disable_checkpoints: true
+learning_rate: 5.0e-05
+freeze_embedder: true

@@ -6,10 +6,6 @@ import lightning.pytorch as pl
 from torchmetrics.classification import MulticlassF1Score, MulticlassAccuracy
 
 
-tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-bert = BertModel.from_pretrained("bert-base-uncased")
-
-
 class LinearEmbeddingTowerForClassification(pl.LightningModule):
     """
     Embedding -- because we embed something with transformers
@@ -57,8 +53,9 @@ class LinearEmbeddingTowerForClassification(pl.LightningModule):
         self.val_metrics = deepcopy(self.train_metrics)
 
 
-    def get_prediction(self, to_embed, other_features):
-        sentence_embedding = self.embedder(to_embed, device=self.device)
+    def get_prediction(self, to_embed, other_features, context=None):
+        """todo: there might be no other features"""
+        sentence_embedding = self.embedder(to_embed, device=self.device, context=context)
         logits = self.head(torch.concat([sentence_embedding, other_features.type(sentence_embedding.dtype)], dim=-1))
         return logits 
 
@@ -95,9 +92,10 @@ class LinearEmbeddingTowerForClassification(pl.LightningModule):
             - labels: [batch_size]
         """
         to_embed = batch["sentence"]
+        context = batch["context"]
         other_features = batch["sentence_features"]
         y = batch["labels"]
-        logits = self.get_prediction(to_embed, other_features)
+        logits = self.get_prediction(to_embed, other_features, context=context)
         loss = self.loss(logits, y)
         # Logging to TensorBoard (if installed) by default
         self.log("train_loss", loss)
@@ -106,9 +104,10 @@ class LinearEmbeddingTowerForClassification(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         to_embed = batch["sentence"]
+        context = batch["context"]
         other_features = batch["sentence_features"]
         y = batch["labels"]
-        logits = self.get_prediction(to_embed, other_features)
+        logits = self.get_prediction(to_embed, other_features, context=context)
         loss = self.loss(logits, y)
 
         # Logging to TensorBoard (if installed) by default
