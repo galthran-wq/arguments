@@ -109,6 +109,7 @@ class ContextBertEmbedder(BaseEmbedder):
             # If not,
             # increment i and reset j
             else:
+                start = None
                 i = i - j + 1;
                 j = 0;
             

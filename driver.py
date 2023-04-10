@@ -2,7 +2,7 @@
 TODO: use LightningCLI to automatically map model hyperparameters
 """
 import argparse
-from runner import CIRunner, CIRunnerSbert, CIRUnnerContextBert
+from runner import CI_Runner
 
 
 def cli_main():
@@ -35,11 +35,11 @@ if __name__ == "__main__":
         seed=42, overfit_batch=None, 
         logs=False, patience=100, 
         logdir='lightning_logs', 
-        experiment_name='CI_full_sentence', experiment_version='extra_features/freeze_bert_5e5_patient_context_bert', 
+        experiment_name='CI_token', experiment_version='freeze_bert_5e5_patient_context_bert', 
         eval_period_epochs=1, max_train_epochs=200, 
         disable_checkpoints=True, learning_rate=5e-05, 
         freeze_embedder=True
     )
 
-    CIRUnnerContextBert(args).run()
+    CI_Runner(args).run()
 

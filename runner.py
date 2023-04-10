@@ -6,8 +6,8 @@ from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping
 from lightning.pytorch.loggers import TensorBoardLogger
 
 from embedder import BertEmbedder, SBertEmbedder, ContextBertEmbedder
-from dataset import ComponentIdentification, DictionaryCollator
-from model import LinearEmbeddingTowerForClassification
+from dataset import ComponentClassification, DictionaryCollator, ComponentIdentification
+from model import LinearEmbeddingTowerForClassification, TokenClassification
 
 
 class BaseRunner:
@@ -28,7 +28,7 @@ class BaseRunner:
     def get_dataset(self):
         raise NotImplemented
     
-    def get_model(self, embedder, ds):
+    def get_model(self, ds, embedder=None):
         raise NotImplemented
     
     def get_embedder(self):
@@ -76,7 +76,7 @@ class BaseRunner:
         val_dl = DataLoader(val, batch_size=64, collate_fn=collator)
 
         embedder = self.get_embedder()
-        model = self.get_model(embedder, ds)
+        model = self.get_model(ds=ds, embedder=embedder)
         callbacks = self.get_callbacks()
         logger = self.get_logger()
         logger.log_hyperparams(self.args)
@@ -92,9 +92,9 @@ class BaseRunner:
         trainer.fit(model=model, train_dataloaders=train_dl, val_dataloaders=val_dl)
 
 
-class CIRunner(BaseRunner):
+class CC_Runner(BaseRunner):
     def get_dataset(self):
-        return ComponentIdentification()
+        return ComponentClassification()
 
     def get_embedder(self):
         return BertEmbedder()
@@ -109,9 +109,9 @@ class CIRunner(BaseRunner):
         )
 
 
-class CIRunnerSbert(BaseRunner):
+class CC_RunnerSbert(BaseRunner):
     def get_dataset(self):
-        return ComponentIdentification()
+        return ComponentClassification()
 
     def get_embedder(self):
         return SBertEmbedder()
@@ -126,9 +126,9 @@ class CIRunnerSbert(BaseRunner):
         )
 
 
-class CIRUnnerContextBert(BaseRunner):
+class CC_RunnerContextBert(BaseRunner):
     def get_dataset(self):
-        return ComponentIdentification()
+        return ComponentClassification()
 
     def get_embedder(self):
         return ContextBertEmbedder()
@@ -140,4 +140,25 @@ class CIRUnnerContextBert(BaseRunner):
             output_dim=3,
             learning_rate=self.args.learning_rate,
             extra_features_dim=ds.n_features
+        )
+
+
+class CI_Runner(BaseRunner):
+    def get_dataset(self):
+        return ComponentIdentification()
+
+    def get_embedder(self):
+        return None
+    
+    def get_collator(self):
+        def identity(batch):
+            return [entry[0] for entry in batch], [entry[1] for entry in batch]
+        return identity
+
+    def get_model(self, ds, embedder=None):
+        """TODO: should somehow get rid of ds dependency"""
+        return TokenClassification(
+            num_labels=ds.num_labels,
+            learning_rate=self.args.learning_rate,
+            freeze=self.args.freeze_embedder
         )
