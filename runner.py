@@ -6,7 +6,7 @@ from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping
 from lightning.pytorch.loggers import TensorBoardLogger
 
 from embedder import BertEmbedder, SBertEmbedder, ContextBertEmbedder
-from dataset import ComponentClassification, DictionaryCollator, ComponentIdentification
+from dataset import ComponentClassification, DictionaryCollator, ComponentIdentification, ComponentIdentificationAndClassification
 from model import LinearEmbeddingTowerForClassification, TokenClassification
 
 
@@ -146,6 +146,27 @@ class CC_RunnerContextBert(BaseRunner):
 class CI_Runner(BaseRunner):
     def get_dataset(self):
         return ComponentIdentification()
+
+    def get_embedder(self):
+        return None
+    
+    def get_collator(self):
+        def identity(batch):
+            return [entry[0] for entry in batch], [entry[1] for entry in batch]
+        return identity
+
+    def get_model(self, ds, embedder=None):
+        """TODO: should somehow get rid of ds dependency"""
+        return TokenClassification(
+            num_labels=ds.num_labels,
+            learning_rate=self.args.learning_rate,
+            freeze=self.args.freeze_embedder
+        )
+    
+
+class CI_CC_Runner(BaseRunner):
+    def get_dataset(self):
+        return ComponentIdentificationAndClassification()
 
     def get_embedder(self):
         return None
