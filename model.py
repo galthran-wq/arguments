@@ -1,6 +1,8 @@
+import math
 from copy import deepcopy
 import torch
 from torch import optim, nn
+from torch.nn.init import kaiming_uniform
 import lightning.pytorch as pl
 from torchmetrics.classification import MulticlassF1Score, MulticlassAccuracy
 from transformers import BertModel, BertTokenizerFast, DataCollatorWithPadding, BertTokenizer
@@ -8,11 +10,16 @@ from transformers import BertModel, BertTokenizerFast, DataCollatorWithPadding, 
 
 class BaseModel(pl.LightningModule):
 
-    def __init__(self, *args, learning_rate=5e-5, **kwargs) -> None:
+    def __init__(self, *args, learning_rate=5e-5, class_index_to_label=None, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.train_metrics = {}
         self.val_metrics = {}
         self.learning_rate = learning_rate
+
+        if class_index_to_label is None:
+            self.class_index_to_label = {}
+        else:
+            self.class_index_to_label = class_index_to_label
 
     def update_metrics(self, logits, y, partition="train"):
             metrics = self.train_metrics if partition=="train" else self.val_metrics
@@ -20,13 +27,19 @@ class BaseModel(pl.LightningModule):
             for metric in metrics.values():
                 metric.update(pred, y)
 
+    def get_label_by_index(self, index):
+        if self.class_index_to_label:
+            return self.class_index_to_label[index]
+        else:
+            return index
+
     def get_metrics(self, partition="train"):
         metrics = self.train_metrics if partition=="train" else self.val_metrics
         results = {}
         for metric_name, metric in metrics.items():
             v = metric.compute()
             results.update({
-                f"{partition}_{metric_name}_{i}": v[i]
+                f"{partition}_{metric_name}_{self.get_label_by_index(i)}": v[i]
                 for i in range(len(v))
             })
             results[f"{partition}_avg_{metric_name}"] = v.mean()
@@ -63,8 +76,6 @@ class LinearEmbeddingTowerForClassification(BaseModel):
     Embedding -- because we embed something with transformers
     Tower -- because we concat extra features to the embeddings
     Linear -- because the head is linear
-
-    TODO: make embedder into a separate class; move preprocessor there.
     """
     def __init__(
             self, 
@@ -82,7 +93,8 @@ class LinearEmbeddingTowerForClassification(BaseModel):
         self.head = nn.Sequential(*([
             nn.Sequential(
                 nn.Dropout(0.5),
-                nn.Linear(self.feature_dim // i, self.feature_dim // (i+1))
+                nn.Linear(self.feature_dim // i, self.feature_dim // (i+1)),
+                nn.ReLU()
             )
             for i in range(1, n_hidden_layers)
         ] + [
@@ -143,6 +155,210 @@ class LinearEmbeddingTowerForClassification(BaseModel):
         self.log("val_loss", loss)
         self.update_metrics(logits, y, partition="val")
         return loss
+
+
+class Simple(BaseModel):
+    def __init__(
+        self, 
+        embedder, *args, 
+        extra_features_dim=0, n_hidden_layers=3, 
+        hidden_size=None, output_dim=2, shared_features_dim=0, 
+        dropout=0.5,
+        **kwargs
+    ):
+        super().__init__(*args, **kwargs)
+        self.embedder = embedder
+
+        self.head = nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size * 2, output_dim),
+        )
+        self.loss = nn.CrossEntropyLoss()
+        # self.loss = nn.BCEWithLogitsLoss()
+        self.train_metrics = {
+            "accuracy": MulticlassAccuracy(
+                num_classes=output_dim,
+                average="none",
+            ),
+            "f1": MulticlassF1Score(
+                num_classes=output_dim,
+                average="none",
+            )
+        }
+        self.val_metrics = deepcopy(self.train_metrics)
+    
+    def get_prediction(
+        self, 
+        to_embed1, other_features1,
+        context,
+        to_embed2, other_features2, shared_features
+    ):
+        hidden1 = self.embedder(to_embed1, device=self.device, context=context)
+        hidden2 = self.embedder(to_embed2, device=self.device, context=context)
+        logits = self.head(torch.concat([hidden1, hidden2], dim=-1))
+        
+        # logits = self.head(torch.concat([hidden1, hidden2, shared_features.type(hidden1.dtype)], dim=-1))
+        return logits
+        
+
+    def training_step(self, batch, batch_idx):
+        """
+        TODO: refactor into separate classes to generalize for token classification.
+        batch -- dictionary:
+            - sentence: str
+            - context: str
+            - sentence_features: [batch_size, extra_features_dim]
+            - labels: [batch_size]
+        """
+        to_embed1 = batch["sentence1"]
+        to_embed2 = batch["sentence2"]
+        context = batch["context"]
+        extra_features1 = batch["extra_features1"]
+        extra_features2 = batch["extra_features2"]
+        shared_features = batch["shared_features"]
+        y = batch["labels"]
+
+        logits = self.get_prediction(
+            to_embed1=to_embed1, 
+            to_embed2=to_embed2,
+            context=context,
+            other_features1=extra_features1, 
+            other_features2=extra_features2,
+            shared_features=shared_features,
+        )
+
+        loss = self.loss(logits, y)
+        # Logging to TensorBoard (if installed) by default
+        self.log("train_loss", loss)
+        self.update_metrics(logits, y)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        to_embed1 = batch["sentence1"]
+        to_embed2 = batch["sentence2"]
+        context = batch["context"]
+        extra_features1 = batch["extra_features1"]
+        extra_features2 = batch["extra_features2"]
+        shared_features = batch["shared_features"]
+        y = batch["labels"]
+
+        logits = self.get_prediction(
+            to_embed1=to_embed1, 
+            to_embed2=to_embed2,
+            context=context,
+            other_features1=extra_features1, 
+            other_features2=extra_features2,
+            shared_features=shared_features,
+        )
+        loss = self.loss(logits, y)
+
+        # Logging to TensorBoard (if installed) by default
+        self.log("val_loss", loss)
+        self.update_metrics(logits, y, partition="val")
+        return loss
+
+
+class LinearEmbeddingDoubleTowerForClassification(BaseModel):
+    """
+    We get its own tower for each of the two sentences.
+    """
+    def __init__(
+        self, 
+        embedder, *args, 
+        extra_features_dim=0, n_hidden_layers=3, 
+        hidden_size=None, output_dim=2, shared_features_dim=0,
+        **kwargs
+    ):
+        super().__init__(*args, **kwargs)
+        self.tower = LinearEmbeddingTowerForClassification(
+            embedder, *args, 
+            extra_features_dim=extra_features_dim, 
+            n_hidden_layers=n_hidden_layers, 
+            # Note
+            output_dim=hidden_size, 
+            **kwargs
+        )
+
+        # self.head = nn.Sequential(
+        #     nn.Dropout(0.5),
+        #     nn.Linear(hidden_size * 2 + shared_features_dim, output_dim)
+        # )
+        # self.loss = nn.CrossEntropyLoss()
+        self.loss = nn.BCEWithLogitsLoss()
+        self.train_metrics = {
+            "accuracy": MulticlassAccuracy(
+                num_classes=output_dim,
+                average="none",
+            ),
+            "f1": MulticlassF1Score(
+                num_classes=output_dim,
+                average="none",
+            )
+        }
+        self.dot_product = torch.nn.Parameter(torch.empty([hidden_size, hidden_size]))
+        kaiming_uniform(self.dot_product, a=math.sqrt(5))
+        
+        self.val_metrics = deepcopy(self.train_metrics)
+    
+    def get_prediction(
+        self, 
+        to_embed1, other_features1,
+        to_embed2, other_features2, shared_features
+    ):
+        hidden1 = self.tower.get_prediction(to_embed1, other_features1)
+        hidden2 = self.tower.get_prediction(to_embed2, other_features2)
+        logits = (hidden2 @ (self.dot_product @ hidden1.T)).diag()
+        
+        # logits = self.head(torch.concat([hidden1, hidden2, shared_features.type(hidden1.dtype)], dim=-1))
+        return logits
+        
+
+    def training_step(self, batch, batch_idx):
+        to_embed1 = batch["sentence1"]
+        to_embed2 = batch["sentence2"]
+        extra_features1 = batch["extra_features1"]
+        extra_features2 = batch["extra_features2"]
+        shared_features = batch["shared_features"]
+        y = batch["labels"].type(torch.float16)
+
+        logits = self.get_prediction(
+            to_embed1=to_embed1, 
+            to_embed2=to_embed2,
+            other_features1=extra_features1, 
+            other_features2=extra_features2,
+            shared_features=shared_features
+        )
+
+        loss = self.loss(logits, y)
+        # Logging to TensorBoard (if installed) by default
+        self.log("train_loss", loss)
+        self.update_metrics(logits, y)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        to_embed1 = batch["sentence1"]
+        to_embed2 = batch["sentence2"]
+        extra_features1 = batch["extra_features1"]
+        extra_features2 = batch["extra_features2"]
+        shared_features = batch["shared_features"]
+        y = batch["labels"].type(torch.float16)
+
+        logits = self.get_prediction(
+            to_embed1=to_embed1, 
+            to_embed2=to_embed2,
+            other_features1=extra_features1, 
+            other_features2=extra_features2,
+            shared_features=shared_features
+        )
+        loss = self.loss(logits, y)
+
+        # Logging to TensorBoard (if installed) by default
+        self.log("val_loss", loss)
+        self.update_metrics(logits, y, partition="val")
+        return loss
+    
+    def update_metrics(self, logits, y, partition="train"):
+        pass
 
 
 class TokenClassification(BaseModel):

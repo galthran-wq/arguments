@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 from transformers import BertModel, BertTokenizer, AutoModel, AutoTokenizer
+from algs import get_subarray_index
 
 
 class BaseEmbedder:
@@ -80,41 +81,8 @@ class ContextBertEmbedder(BaseEmbedder):
         self.freeze = freeze
         self.dim = self.bert.config.hidden_size
         self.cache = {}
+        self.debug = True
 
-    def get_subarray_index(self, A, B):
-        n = len(A)
-        m = len(B)
-        # Two pointers to traverse the arrays
-        i = 0
-        j = 0
-        start = None
-    
-        # Traverse both arrays simultaneously
-        while (i < n and j < m):
-    
-            # If element matches
-            # increment both pointers
-            if (A[i] == B[j]):
-                if start is None:
-                    start = i
-    
-                i += 1;
-                j += 1;
-    
-                # If array B is completely
-                # traversed
-                if (j == m):
-                    return start;
-            
-            # If not,
-            # increment i and reset j
-            else:
-                start = None
-                i = i - j + 1;
-                j = 0;
-            
-        return start
-    
     def truncate_inputs(self, input, sentence_start=None, sentence_length=None):
         """
         BERT has a window of fixed length, usually 512 tokens. 
@@ -144,7 +112,15 @@ class ContextBertEmbedder(BaseEmbedder):
             context_input = self.tokenizer(context_i, return_tensors="pt")
             context_input = self.truncate_inputs(context_input)
             tokenized_context = context_input["input_ids"][0]
-            sentence_start = self.get_subarray_index(tokenized_context, tokenized_sentence)
+            sentence_start = get_subarray_index(tokenized_context, tokenized_sentence)
+
+            if self.debug:
+                init_sentence = self.tokenizer.decode(tokenized_sentence)
+                found_sentence = self.tokenizer.decode(
+                    tokenized_context[sentence_start:sentence_start+len(tokenized_sentence)]
+                )
+                if found_sentence != init_sentence:
+                    print(f"mismatch: \n init: {init_sentence} \n found: {found_sentence}")
 
             if self.freeze:
                 with torch.no_grad():
