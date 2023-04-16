@@ -1,22 +1,25 @@
+from typing import Union, Dict
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from transformers import BertModel, BertTokenizer, AutoModel, AutoTokenizer
 from algs import get_subarray_index
 
 
-class BaseEmbedder:
-    def __call__(self, to_embed, context=None, device=None):
+class BaseEmbedder(nn.Module):
+    def forward(self, to_embed, context=None, device=None, extra_features=None):
         raise NotImplemented
 
 
-class BertEmbedder(BaseEmbedder):
+class BertClsEmbedder(BaseEmbedder):
     def __init__(self, bert_checkpoint="bert-base-uncased", freeze=True) -> None:
+        super().__init__()
         self.bert = BertModel.from_pretrained(bert_checkpoint)
         self.tokenizer = BertTokenizer.from_pretrained(bert_checkpoint)
         self.freeze = freeze
         self.dim = self.bert.config.hidden_size
     
-    def __call__(self, to_embed, context=None, device=None):
+    def forward(self, to_embed, context=None, device=None, extra_features=None):
         """
         Embed a sentence with the [CLS] token output.
         """
@@ -32,11 +35,68 @@ class BertEmbedder(BaseEmbedder):
         else:
             sentence_embedding = self.bert(**inputs).last_hidden_state[:, 0, :]
         
+        if extra_features is not None:
+            sentence_embedding = torch.concat([
+                sentence_embedding, 
+                (extra_features).type(sentence_embedding.dtype)
+            ], dim=-1)
+
+        return sentence_embedding
+
+
+class BertEmbedder(BaseEmbedder):
+    def __init__(
+        self, 
+        bert_checkpoint="bert-base-uncased",
+        freeze=True,
+        is_tokenized=True
+    ) -> None:
+        super().__init__()
+        self.is_tokenized = is_tokenized
+        self.bert = BertModel.from_pretrained(bert_checkpoint)
+        self.tokenizer = BertTokenizer.from_pretrained(bert_checkpoint)
+        self.freeze = freeze
+        self.dim = self.bert.config.hidden_size
+    
+    def forward(
+        self, 
+        to_embed: Union[Dict[str, torch.Tensor], str] , 
+        context=None, 
+        device=None, 
+        extra_features=None
+    ):
+        """Get embeddings for each token in the input sentence.
+
+        Args:
+            to_embed (Union[Dict[str, torch.Tensor], str]): If the sentence is already tokenized, then these are the inputs to the BertModel. If not, it is a sentence
+            context ([type], optional): [description]. Defaults to None.
+            device ([type], optional): [description]. Defaults to None.
+            extra_features ([type], optional): Does not support extra features.
+
+        Returns:
+            [type]: [description]
+        """
+        if self.is_tokenized:
+            inputs = to_embed
+        else:
+            inputs = self.tokenizer(to_embed, return_tensors="pt", padding=True)
+
+        if device is not None:
+            inputs = inputs.to(device)
+            self.bert = self.bert.to(device)
+
+        if self.freeze:
+            with torch.no_grad():
+                sentence_embedding = self.bert(**inputs).last_hidden_state
+        else:
+            sentence_embedding = self.bert(**inputs).last_hidden_state
+
         return sentence_embedding
 
 
 class SBertEmbedder(BaseEmbedder):
     def __init__(self, freeze=True) -> None:
+        super().__init__()
         # Load model from HuggingFace Hub
         self.tokenizer = AutoTokenizer.from_pretrained('sentence-transformers/all-MiniLM-L6-v2')
         self.sbert = AutoModel.from_pretrained('sentence-transformers/all-MiniLM-L6-v2')
@@ -48,7 +108,7 @@ class SBertEmbedder(BaseEmbedder):
         input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
         return torch.sum(token_embeddings * input_mask_expanded, 1) / torch.clamp(input_mask_expanded.sum(1), min=1e-9)
 
-    def __call__(self, to_embed, context=None, device=None):
+    def forward(self, to_embed, context=None, device=None, extra_features=None):
         """
         Embed a sentence with the [CLS] token output.
         """
@@ -75,6 +135,7 @@ class SBertEmbedder(BaseEmbedder):
 
 class ContextBertEmbedder(BaseEmbedder):
     def __init__(self, bert_checkpoint="bert-base-uncased", freeze=True) -> None:
+        super().__init__()
         # Load model from HuggingFace Hub
         self.tokenizer = AutoTokenizer.from_pretrained(bert_checkpoint)
         self.bert = AutoModel.from_pretrained(bert_checkpoint)
@@ -98,7 +159,7 @@ class ContextBertEmbedder(BaseEmbedder):
         return input
 
     
-    def __call__(self, to_embed, context=None, device=None):
+    def forward(self, to_embed, context=None, device=None, extra_features=None):
         n = len(to_embed)
         embeddings = torch.empty((n, self.dim))
 

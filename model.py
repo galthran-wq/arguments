@@ -1,3 +1,4 @@
+from typing import Dict
 import math
 from copy import deepcopy
 import torch
@@ -7,6 +8,9 @@ import lightning.pytorch as pl
 from torchmetrics.classification import MulticlassF1Score, MulticlassAccuracy
 from transformers import BertModel, BertTokenizerFast, DataCollatorWithPadding, BertTokenizer
 
+import embedder
+import head
+
 
 class BaseModel(pl.LightningModule):
 
@@ -14,18 +18,27 @@ class BaseModel(pl.LightningModule):
         super().__init__(*args, **kwargs)
         self.train_metrics = {}
         self.val_metrics = {}
+        self._test_metrics = {}
         self.learning_rate = learning_rate
 
         if class_index_to_label is None:
             self.class_index_to_label = {}
         else:
             self.class_index_to_label = class_index_to_label
+    
+    def get_metrics_for_subset(self, subset):
+        if subset == "train":
+            return self.train_metrics
+        elif subset == "val":
+            return self.val_metrics
+        else:
+            return self.test_metrics
 
-    def update_metrics(self, logits, y, partition="train"):
-            metrics = self.train_metrics if partition=="train" else self.val_metrics
-            pred = logits.argmax(dim=-1)
-            for metric in metrics.values():
-                metric.update(pred, y)
+    def update_metrics(self, logits, y, subset="train"):
+        metrics = self.get_metrics_for_subset(subset)
+        pred = logits.argmax(dim=-1)
+        for metric in metrics.values():
+            metric.update(pred, y)
 
     def get_label_by_index(self, index):
         if self.class_index_to_label:
@@ -33,29 +46,33 @@ class BaseModel(pl.LightningModule):
         else:
             return index
 
-    def get_metrics(self, partition="train"):
-        metrics = self.train_metrics if partition=="train" else self.val_metrics
+    def get_metrics(self, subset="train"):
+        metrics = self.get_metrics_for_subset(subset)
         results = {}
         for metric_name, metric in metrics.items():
             v = metric.compute()
             results.update({
-                f"{partition}_{metric_name}_{self.get_label_by_index(i)}": v[i]
+                f"{subset}_{metric_name}_{self.get_label_by_index(i)}": v[i]
                 for i in range(len(v))
             })
-            results[f"{partition}_avg_{metric_name}"] = v.mean()
+            results[f"{subset}_avg_{metric_name}"] = v.mean()
         return results
 
-    def reset_metrics(self, partition="train"):
-        metrics = self.train_metrics if partition=="train" else self.val_metrics
+    def reset_metrics(self, subset="train"):
+        metrics = self.get_metrics_for_subset(subset)
         for metric in metrics.values():
             metric.reset()
 
     def on_train_start(self) -> None:
-            for metric in self.train_metrics.values():
-                metric.to(self.device)
+        for metric in self.train_metrics.values():
+            metric.to(self.device)
 
     def on_validation_start(self) -> None:
         for metric in self.val_metrics.values():
+            metric.to(self.device)
+
+    def on_test_start(self) -> None:
+        for metric in self.test_metrics.values():
             metric.to(self.device)
     
     def on_train_epoch_end(self) -> None:
@@ -63,12 +80,110 @@ class BaseModel(pl.LightningModule):
         self.reset_metrics()
     
     def on_validation_epoch_end(self) -> None:
-        self.log_dict(self.get_metrics(partition="val"))
-        self.reset_metrics(partition="val")
+        self.log_dict(self.get_metrics(subset="val"))
+        self.reset_metrics(subset="val")
+    
+    def on_test_epoch_end(self) -> None:
+        self.log_dict(self.get_metrics(subset="test"))
+        self.reset_metrics(subset="test")
     
     def configure_optimizers(self):
         optimizer = optim.Adam(self.parameters(), lr=self.learning_rate)
         return optimizer
+
+
+class MainModel(BaseModel):
+    def __init__(
+        self, *args, 
+        embedder: embedder.BaseEmbedder, 
+        # aggregator: embedder.BaseEmbedder, 
+        head: head.BaseHead, 
+        learning_rate: float = 1e-4, 
+        class_index_to_label=None, 
+        pairs: bool = False,
+        has_extra_features: bool = False,
+        has_shared_features: bool = False,
+        ignore_index: int = -100,
+        **kwargs
+    ) -> None:
+        super().__init__(*args, learning_rate=learning_rate, class_index_to_label=class_index_to_label, **kwargs)
+        self.embedder = embedder
+        # self.aggregator = aggregator
+        self.head = head
+
+        self.ignore_index = ignore_index
+        self.output_dim = head.output_dim
+        self.pairs = pairs
+        self.has_extra_features = has_extra_features
+        self.has_shared_features = has_shared_features
+
+        self.train_metrics = {
+            "accuracy": MulticlassAccuracy(
+                num_classes=self.output_dim,
+                average="none",
+                ignore_index=ignore_index
+            ),
+            "f1": MulticlassF1Score(
+                num_classes=self.output_dim,
+                average="none",
+                ignore_index=ignore_index
+            )
+        }
+        self.val_metrics = deepcopy(self.train_metrics)
+        self.test_metrics = deepcopy(self.train_metrics)
+
+        self.loss = nn.CrossEntropyLoss(ignore_index=ignore_index)
+    
+    def common_step(self, batch: Dict, batch_idx, subset="train"):
+        to_embed1 = batch["sentence1"]
+        to_embed2 = batch.get("sentence2", None)
+        context = batch.get("context", None)
+        extra_features1 = batch.get("extra_features1", None)
+        extra_features2 = batch.get("extra_features2", None)
+        shared_features = batch.get("shared_features", None)
+        y = batch["labels"]
+
+        embedded1 = self.embedder(
+            to_embed=to_embed1, 
+            context=context, 
+            extra_features=extra_features1,
+            device=self.device, 
+        )
+        if self.pairs:
+            embedded2 = self.embedder(
+                to_embed=to_embed2, 
+                context=context, 
+                device=self.device, 
+                extra_features=extra_features2
+            )
+        # TODO: we should(?) allow for different strategies
+        # aggregator(embedded1, embedded2, shared_features)
+        to_concat = [embedded1]
+        if self.pairs:
+            to_concat.append(embedded2)
+        if self.has_shared_features:
+            to_concat.append(shared_features)
+        embedded = torch.concat(to_concat, dim=-1)
+        ###############
+        logits = self.head(embedded).view(-1, self.output_dim)
+
+        # some models classify tokens; so we loose (sequence_length) dimension
+        logits = logits.view(-1, self.output_dim)
+        y = y.flatten()
+
+        loss = self.loss(logits, y)
+        self.log(f"{subset}_loss", loss, batch_size=len(y))
+        self.update_metrics(logits, y, subset=subset)
+        return loss
+
+    def training_step(self, batch, batch_idx):
+        return self.common_step(batch, batch_idx)
+
+    def validation_step(self, batch, batch_idx):
+        return self.common_step(batch, batch_idx, subset="val")
+
+    def test_step(self, batch, batch_idx):
+        return self.common_step(batch, batch_idx, subset="test")
 
 
 class LinearEmbeddingTowerForClassification(BaseModel):
@@ -359,105 +474,3 @@ class LinearEmbeddingDoubleTowerForClassification(BaseModel):
     
     def update_metrics(self, logits, y, partition="train"):
         pass
-
-
-class TokenClassification(BaseModel):
-    def __init__(self, *args, num_labels=2, freeze=True, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.tokenizer = BertTokenizerFast.from_pretrained("bert-base-uncased")
-        self.tokenizer_pad = BertTokenizer.from_pretrained("bert-base-uncased")
-        self.bert = BertModel.from_pretrained(
-            "bert-base-uncased",
-            num_labels=num_labels
-        )       
-        self.head = nn.Sequential(
-            nn.Dropout(0.5),
-            nn.Linear(self.bert.config.hidden_size, num_labels)
-        )
-        self.loss = nn.CrossEntropyLoss(ignore_index=-100)
-        self.num_labels = num_labels
-        self.freeze = freeze
-
-        self.train_metrics = {
-            "accuracy": MulticlassAccuracy(
-                num_classes=num_labels,
-                average="none",
-                ignore_index=-100
-            ),
-            "f1": MulticlassF1Score(
-                num_classes=num_labels,
-                average="none",
-                ignore_index=-100
-            )
-        }
-        self.val_metrics = deepcopy(self.train_metrics)
-        self.collator = DataCollatorWithPadding(tokenizer=self.tokenizer)
-
-    def tokenize_and_align_labels(self, tokenized, ner_tags, tokenizer):
-        tokenized_inputs = tokenizer(tokenized, truncation=True, is_split_into_words=True)
-
-        labels = []
-        for i, label in enumerate(ner_tags):
-            word_ids = tokenized_inputs.word_ids(batch_index=i)  # Map tokens to their respective word.
-            previous_word_idx = None
-            label_ids = []
-            for word_idx in word_ids:  # Set the special tokens to -100.
-                if word_idx is None:
-                    label_ids.append(-100)
-                elif word_idx != previous_word_idx:  # Only label the first token of a given word.
-                    label_ids.append(label[word_idx])
-                else:
-                    label_ids.append(-100)
-                previous_word_idx = word_idx
-            labels.append(label_ids)
-
-        max_l = max(map(lambda x: len(x), labels))
-        for i in range(len(labels)):
-            labels[i] = labels[i] + [-100] * (max_l - len(labels[i]))
-        labels = torch.tensor(labels).to(self.device)
-        # pad rest
-        tokenized_inputs = self.collator(tokenized_inputs)
-        for k, v in tokenized_inputs.items():
-            tokenized_inputs[k] = v.to(self.device)
-        return tokenized_inputs, labels
-    
-    def get_prediction(self, inputs):
-        if self.freeze:
-            with torch.no_grad():
-                outputs = self.bert(**inputs)[0]
-        else:
-            outputs = self.bert(**inputs)[0]
-        logits = self.head(outputs)
-        return logits
-
-    def training_step(self, batch, batch_idx):
-        inputs, labels = batch
-        batch_size = len(labels)
-        inputs, labels = self.tokenize_and_align_labels(inputs, labels, tokenizer=self.tokenizer)
-        # labels = inputs["labels"] 
-        logits = self.get_prediction(inputs)
-
-        logits = logits.view(-1, self.num_labels)
-        labels = labels.flatten()
-        
-        loss = self.loss(logits, labels)
-        # Logging to TensorBoard (if installed) by default
-        self.log("train_loss", loss, batch_size=batch_size)
-        self.update_metrics(logits, labels)
-        return loss
-
-    def validation_step(self, batch, batch_idx):
-        inputs, labels = batch
-        batch_size = len(labels)
-        inputs, labels = self.tokenize_and_align_labels(inputs, labels, tokenizer=self.tokenizer)
-        # labels = inputs["labels"] 
-        logits = self.get_prediction(inputs)
-
-        logits = logits.view(-1, self.num_labels)
-        labels = labels.flatten()
-        
-        loss = self.loss(logits, labels)
-        # Logging to TensorBoard (if installed) by default
-        self.log("val_loss", loss, batch_size=batch_size)
-        self.update_metrics(logits, labels, partition="val")
-        return loss

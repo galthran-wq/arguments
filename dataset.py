@@ -2,8 +2,11 @@ from typing import List, Dict, Any
 import torch
 import numpy as np
 import pandas as pd
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader, random_split
 from nltk import word_tokenize
+import lightning.pytorch as pl
+from transformers import AutoTokenizer
+from transformers import default_data_collator
 
 import arguE.data_builder as data_builder
 from arguE.data_loader import load_from_directory
@@ -12,6 +15,14 @@ from algs import get_subarray_index
 
 
 class BaseDataset(Dataset):
+    def __init__(self, stage) -> None:
+        super().__init__()
+        self.train_indices = pd.read_csv(
+            "./student_corpora/ArgumentAnnotatedEssays-2.0/train-test-split.csv",
+            sep=";"
+        ).loc[:, "SET"]
+        self.train_indices = self.train_indices[self.train_indices == "TRAIN"].index
+
     @property
     def labels_map(self):
         raise NotImplemented
@@ -40,8 +51,8 @@ class ComponentClassification(BaseDataset):
             "MajorClaim": 2,
         }
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, stage) -> None:
+        super().__init__(stage)
         self.data = load_from_directory(
             "./arguEParser/outputCorpora/essays/",
             ADU=True
@@ -53,6 +64,13 @@ class ComponentClassification(BaseDataset):
             'numberOfSharedStemWordsFull1'
         ]
         self.n_features = len(self.data.loc[0, "pos1"]) + len(self.feature_columns)
+
+        if stage == "test":
+            self.data = self.data[~self.data["argumentationID"].isin(self.train_indices)]
+        else:
+            self.data = self.data[self.data["argumentationID"].isin(self.train_indices)]
+        
+        self.data.reset_index(inplace=True)
 
     def __len__(self):
         return len(self.data)
@@ -74,9 +92,9 @@ class ComponentClassification(BaseDataset):
         sentence_features += self.data.loc[index, self.feature_columns].tolist()
 
         return {
-            "sentence": sentence, 
+            "sentence1": sentence, 
             "context": context,
-            "sentence_features": sentence_features,
+            "extra_features1": sentence_features,
             "label": label
         }
 
@@ -112,12 +130,18 @@ class ComponentIdentificationAndClassification(BaseDataset):
     def num_labels(self):
         return len(self.labels_map)
     
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, stage) -> None:
+        super().__init__(stage)
         self.ann = pd.DataFrame(columns=["essay_id", "type", "detail", "text"])
         self.essays = {}
+        if stage == "test":
+            essay_indices = np.setdiff1d(range(1, 402), self.train_indices)
+        else:
+            essay_indices = self.train_indices
 
-        for i in range(1, 403):
+        # Because in files they start from 1
+        essay_indices += 1
+        for i in essay_indices:
             essay_ann_i = pd.read_csv(
                 f"./arguEParser/inputCorpora/essays/essay{'%03d' % i }.ann", 
                 delimiter="\t", header=None
@@ -162,10 +186,13 @@ class ComponentIdentificationAndClassification(BaseDataset):
         return len(self.essays)
 
     def __getitem__(self, index):
-        return (
-            self.essays[self.index2essay_id[index]], 
-            self.labels[self.index2essay_id[index]]
-        )
+        # TODO: it is not quite a sentence, but an entire essay, 
+        # should I make a different interface?
+        # this would imply changing the MainModel
+        return { 
+            "sentence1": self.essays[self.index2essay_id[index]], 
+            "label": self.labels[self.index2essay_id[index]]
+        }
 
 
 class ComponentIdentification(ComponentIdentificationAndClassification):
@@ -193,7 +220,7 @@ class ComponentIdentification(ComponentIdentificationAndClassification):
         return 3 
 
 
-class RelationIdentificationAndClassification(Dataset):
+class RelationIdentificationAndClassification(BaseDataset):
     
     @property
     def labels_map(self):
@@ -203,8 +230,8 @@ class RelationIdentificationAndClassification(Dataset):
             "attacks": 2,
         }
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, stage) -> None:
+        super().__init__(stage)
         self.data = pd.read_csv("./balanced_relation.csv")
         self.to_embed1 = "arg1"
         self.to_embed2 = "arg2"
@@ -272,7 +299,7 @@ class RelationIdentification(RelationIdentificationAndClassification):
         }
     
     def __init__(self, *args, **kwargs) -> None:
-        super().__init__()
+        super().__init__(*args, **kwargs)
         super_supports_index = super().labels_map["supports"]
         super_attacks_index = super().labels_map["attacks"]
         self.data["label"] = self.data["label"].replace({
@@ -282,26 +309,155 @@ class RelationIdentification(RelationIdentificationAndClassification):
 
 
 class DictionaryCollator:
-    """
-    Inspired by transformers/data/data_collator.py
-    """
-    def __call__(self, features: List[Dict[str, Any]], return_tensors="pt") -> Dict[str, Any]:
-        first = features[0]
-        batch = {}
+    def __call__(self, *args, **kwargs) -> Dict[str, Any]:
+        return default_data_collator(*args, **kwargs)
 
-        if "label" in first and first["label"] is not None:
-            label = first["label"].item() if isinstance(first["label"], torch.Tensor) else first["label"]
-            dtype = torch.long if isinstance(label, int) else torch.float
-            batch["labels"] = torch.tensor([f["label"] for f in features], dtype=dtype)
-        
-        for k, v in first.items():
-            if isinstance(v, str):
-                batch[k] = [f[k] for f in features]
-            elif k != "label" and v is not None:
-                if isinstance(v, torch.Tensor):
-                    batch[k] = torch.stack([f[k] for f in features])
-                elif isinstance(v, np.ndarray):
-                    batch[k] = torch.tensor(np.stack([f[k] for f in features]))
+
+class BaseDataModule(pl.LightningDataModule):
+    dataset_class = None
+
+    def __init__(self, train_batch_size=32, val_batch_size=64, test_size=0.2) -> None:
+        super().__init__()
+        self.test_size = test_size
+        self.train_batch_size = train_batch_size 
+        self.val_batch_size = val_batch_size
+    
+    def get_collator(self):
+        return default_data_collator
+
+    def setup(self, stage: str) -> None:
+        self.dataset = self.dataset_class(stage)
+        self.train, self.val = random_split(
+            self.dataset, [1-self.test_size, self.test_size]
+        )
+
+    def train_dataloader(self):
+        return DataLoader(
+            self.train, batch_size=self.train_batch_size, 
+            collate_fn=self.get_collator()
+        )
+
+    def val_dataloader(self):
+        return DataLoader(
+            self.val, batch_size=self.val_batch_size, 
+            collate_fn=self.get_collator()
+        )
+    
+    def test_dataloader(self):
+        # in this case dataset is already the test partition
+        return DataLoader(
+            self.dataset, batch_size=self.val_batch_size, 
+            collate_fn=self.get_collator()
+        )
+
+
+class ComponentClassificationDataModule(BaseDataModule):
+    dataset_class = ComponentClassification
+
+
+class ComponentIdentificationAndClassificationDataModule(BaseDataModule):
+    """CI (whether with CC or not) is a token classification task.
+    The entry of the dataset is (sentence_split_into_words, label_for_each_word).
+    To feed this to the embedder, we have to tokenized it differently (generally; depending on the embedder)
+    and realign the labels.
+    
+    This DataModule uses huggingface datasests and tokenizers to do this.
+    TODO: postprocessing -- from predictions to lables
+    """
+    dataset_class = ComponentIdentificationAndClassification
+
+    def __init__(self, train_batch_size=32, val_batch_size=64, test_size=0.2, tokenizer_checkpoint="bert-base-uncased") -> None:
+        super().__init__(train_batch_size, val_batch_size, test_size)
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_checkpoint)
+
+    def tokenize_and_align_labels(self, examples, tokenizer):
+        """
+
+        Args:
+            tokenized ([type]): [description]
+            ner_tags ([type]): [description]
+            tokenizer ([type]): [description]
+
+        Returns:
+            [type]: [description]
+        """
+        tokenized = examples["sentence1"]
+        ner_tags = examples["label"]
+        tokenized_inputs = tokenizer(tokenized, truncation=True, is_split_into_words=True)
+
+        labels = []
+        for i, label in enumerate(ner_tags):
+            word_ids = tokenized_inputs.word_ids(batch_index=i)  # Map tokens to their respective word.
+            previous_word_idx = None
+            label_ids = []
+            for word_idx in word_ids:  # Set the special tokens to -100.
+                if word_idx is None:
+                    label_ids.append(-100)
+                elif word_idx != previous_word_idx:  # Only label the first token of a given word.
+                    label_ids.append(label[word_idx])
                 else:
-                    batch[k] = torch.tensor([f[k] for f in features])
-        return batch
+                    label_ids.append(-100)
+                previous_word_idx = word_idx
+            labels.append(label_ids)
+       
+        return {
+            "sentence1": tokenized_inputs["input_ids"],
+            "label": labels
+        }
+
+    def get_collator(self):
+        """
+        ```DataCollatorWithPadding``` does not pad labels. It is done manually.
+        I also cannot get rid of it because it gives attention masks
+        """
+        from transformers import DataCollatorWithPadding
+        collator_ = DataCollatorWithPadding(tokenizer=self.tokenizer)
+        def collate_fn(batch):
+            # list of dicts to dict of lists
+            batch = { k: [entry[k] for entry in batch]  for k in batch[0].keys() }
+            ## pad inputs; create attention mask
+            # it cannot ignore keys
+            padded_inputs = collator_({"input_ids": batch["sentence1"]})
+
+            ## pad labels
+            labels = batch["label"]
+            max_l = max(map(lambda x: len(x), labels))
+            for i in range(len(labels)):
+                labels[i] = labels[i] + [-100] * (max_l - len(labels[i]))
+            labels = torch.tensor(labels)
+
+            return {
+                "sentence1": padded_inputs,
+                "labels": labels,
+            }
+        return collate_fn
+
+    def setup(self, stage: str) -> None:
+        super().setup(stage)
+        from datasets import Dataset
+        def _map(ds: Dataset):
+            return ds.map(
+                self.tokenize_and_align_labels,
+                batched=True,
+                fn_kwargs={"tokenizer": self.tokenizer}
+            )
+        if stage == "fit":
+            self.train = _map(Dataset.from_list(self.train))
+            self.val = _map(Dataset.from_list(self.val))
+        # elif stage == "val":
+        #     self.val = _map(Dataset.from_list(self.val))
+        elif stage == "test":
+            self.dataset = _map(Dataset.from_list(self.dataset))
+        else:
+            raise NotImplementedError(stage)
+
+class ComponentIdentificationDataModule(ComponentIdentificationAndClassificationDataModule):
+    dataset_class = ComponentIdentification 
+
+
+class RelationIdentificationDataModule(BaseDataModule):
+    dataset_class = RelationIdentification
+
+class RelationIdentificationAndClassificationDataModule(BaseDataModule):
+    dataset_class = RelationIdentificationAndClassification
+
