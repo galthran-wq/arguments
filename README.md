@@ -43,6 +43,12 @@ python lightning_driver.py test \
 ```
 
 
+## Training logs
+
+```
+tensorboard --logdir ./lightning_logs
+```
+
 ## Infrastructure
 
 LightningCLI
