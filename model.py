@@ -146,7 +146,7 @@ class MainModel(BaseModel):
         embedded1 = self.embedder(
             to_embed=to_embed1, 
             context=context, 
-            extra_features=extra_features1,
+            extra_features=extra_features1 if self.has_extra_features else None,
             device=self.device, 
         )
         if self.pairs:
@@ -154,7 +154,7 @@ class MainModel(BaseModel):
                 to_embed=to_embed2, 
                 context=context, 
                 device=self.device, 
-                extra_features=extra_features2
+                extra_features=extra_features2 if self.has_extra_features else None
             )
         # TODO: we should(?) allow for different strategies
         # aggregator(embedded1, embedded2, shared_features)
@@ -162,7 +162,7 @@ class MainModel(BaseModel):
         if self.pairs:
             to_concat.append(embedded2)
         if self.has_shared_features:
-            to_concat.append(shared_features)
+            to_concat.append(shared_features.type(embedded1.dtype))
         embedded = torch.concat(to_concat, dim=-1)
         ###############
         logits = self.head(embedded).view(-1, self.output_dim)

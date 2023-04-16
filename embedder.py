@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import BertModel, BertTokenizer, AutoModel, AutoTokenizer
 from algs import get_subarray_index
+from tqdm.auto import tqdm
 
 
 class BaseEmbedder(nn.Module):
@@ -134,7 +135,7 @@ class SBertEmbedder(BaseEmbedder):
 
 
 class ContextBertEmbedder(BaseEmbedder):
-    def __init__(self, bert_checkpoint="bert-base-uncased", freeze=True) -> None:
+    def __init__(self, bert_checkpoint="bert-base-uncased", freeze=True, debug=False) -> None:
         super().__init__()
         # Load model from HuggingFace Hub
         self.tokenizer = AutoTokenizer.from_pretrained(bert_checkpoint)
@@ -142,7 +143,7 @@ class ContextBertEmbedder(BaseEmbedder):
         self.freeze = freeze
         self.dim = self.bert.config.hidden_size
         self.cache = {}
-        self.debug = True
+        self.debug = debug
 
     def truncate_inputs(self, input, sentence_start=None, sentence_length=None):
         """
@@ -163,7 +164,7 @@ class ContextBertEmbedder(BaseEmbedder):
         n = len(to_embed)
         embeddings = torch.empty((n, self.dim))
 
-        for i, (sentence_i, context_i) in enumerate(zip(to_embed, context)):
+        for i, (sentence_i, context_i) in tqdm(enumerate(zip(to_embed, context))):
             if sentence_i in self.cache:
                 embeddings[i, :] = self.cache[sentence_i]
                 continue

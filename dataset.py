@@ -309,8 +309,30 @@ class RelationIdentification(RelationIdentificationAndClassification):
 
 
 class DictionaryCollator:
-    def __call__(self, *args, **kwargs) -> Dict[str, Any]:
-        return default_data_collator(*args, **kwargs)
+    """
+    Inspired by transformers/data/data_collator.py
+    """
+    def __call__(self, features: List[Dict[str, Any]], return_tensors="pt") -> Dict[str, Any]:
+        first = features[0]
+        batch = {}
+
+        if "label" in first and first["label"] is not None:
+            label = first["label"].item() if isinstance(first["label"], torch.Tensor) else first["label"]
+            dtype = torch.long if isinstance(label, int) else torch.float
+            batch["labels"] = torch.tensor([f["label"] for f in features], dtype=dtype)
+
+        for k, v in first.items():
+            if isinstance(v, str):
+                batch[k] = [f[k] for f in features]
+            elif k != "label" and v is not None:
+                if isinstance(v, torch.Tensor):
+                    batch[k] = torch.stack([f[k] for f in features])
+                elif isinstance(v, np.ndarray):
+                    batch[k] = torch.tensor(np.stack([f[k] for f in features]))
+                else:
+                    batch[k] = torch.tensor([f[k] for f in features])
+        # return default_data_collator(*args, **kwargs)
+        return batch
 
 
 class BaseDataModule(pl.LightningDataModule):
@@ -323,7 +345,7 @@ class BaseDataModule(pl.LightningDataModule):
         self.val_batch_size = val_batch_size
     
     def get_collator(self):
-        return default_data_collator
+        return DictionaryCollator()
 
     def setup(self, stage: str) -> None:
         self.dataset = self.dataset_class(stage)
